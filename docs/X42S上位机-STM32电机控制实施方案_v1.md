@@ -136,4 +136,4 @@ python tools/test_firmware.py
 python tools/host_link.py --type velocity --left 30 --right 30 --seq 1
 ```
 
-实际接线、逐步验收见 [下位机实现与联调](下位机实现与联调.md)，整车路线见 [ROS 小车自主探索方案](ROS小车自主探索方案_v1.md)，离线图文见 [共享串口接线总览](wiring/共享串口接线与CubeMX配置总览.html)。
+实际接线、逐步验收见 [下位机实现与联调](下位机实现与联调.md)，整车路线见 [ROS 小车自主探索方案](ROS小车自主探索方案_v1.md)，离线图文见 [共享串口接线总览](共享串口接线与CubeMX配置总览.html)。

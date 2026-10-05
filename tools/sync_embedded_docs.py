@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE = ROOT / 'docs' / 'wiring' / '共享串口接线与CubeMX配置总览.html'
+PAGE = ROOT / 'docs' / '共享串口接线与CubeMX配置总览.html'
 PATTERN = re.compile(r'(<script id="embedded-sources" type="application/json">)(.*?)(</script>)', re.S)
 
 
