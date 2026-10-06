@@ -20,26 +20,35 @@ typedef struct {
 } MotorFeedback;
 typedef enum { MOTOR_OK=0, MOTOR_BAD_ARGUMENT=1, MOTOR_NOT_READY=2,
                MOTOR_SAFETY_LOCK=3, MOTOR_BUSY=4 } MotorResult;
+/* 参数直接填整数，例如 30、-30、10；电机方向由配置自动转换。 */
+/* 初始化电机；now 填 HAL_GetTick() 返回的当前毫秒数。 */
 void CarMotor_Init(uint32_t now);
-/* 主循环推进查询/目标/恢复；每次最多提交一个普通事务，不阻塞等待 ACK。 */
+/* 在主循环处理电机任务；now 填 HAL_GetTick() 返回的当前毫秒数。 */
 void CarMotor_Poll(uint32_t now);
-/* enable=1 请求使能；=0 先停双轮，再失能指定地址。返回 MOTOR_OK 仅为接受。 */
+/* addr 填电机地址，默认左轮1、右轮2；单轮模式只用左轮地址。
+ * enable 填1使能、0失能；返回成功后还要等电机反馈确认。 */
 MotorResult CarMotor_Enable(uint8_t addr, uint8_t enable);
-/* rpm 带符号且受 CAR_MAX_RPM 限制，acc 为 0~255 的驱动器档位。 */
+/* addr 填电机地址，默认左1、右2；rpm 填整数转速，单位 RPM，默认允许 -60~60。
+ * 转速正数前进、负数后退、0为零速；acc 填加速度档位0~255，常用10；先使能再调速。 */
 MotorResult CarMotor_Velocity(uint8_t addr, int16_t rpm, uint8_t acc);
-/* 先检查两轮，全部通过才更新目标；硬件实际逐台发送，不是同步广播。 */
+/* left、right 填左右电机的整数转速，单位 RPM，默认允许 -60~60。
+ * 正数前进、负数后退、0为零速；acc 填加速度档位0~255，例如填30、30、10让两轮前进。 */
 MotorResult CarMotor_Wheels(int16_t left, int16_t right, uint8_t acc);
-/* pulses 为带符号细分脉冲，rpm=1..上限；mode 0=相对上一输入目标，
- * 1=绝对坐标，2=相对实时位置。只发送一次，ACK 丢失后故障停机，不重发。 */
+/* addr 填电机地址；pulses 填带正负号的整数细分脉冲数。
+ * rpm 填正整数转速，单位 RPM，默认1~60；acc 填加速度档位0~255。
+ * mode 填0相对上一目标、1绝对坐标、2相对当前位置；位置动作只发送一次。 */
 MotorResult CarMotor_Position(uint8_t addr, int32_t pulses, uint16_t rpm, uint8_t acc, uint8_t mode);
+/* left、right 填左右轮的整数细分脉冲数，rpm、acc、mode 的填法同上。
+ * 相对模式正数向前、负数向后；绝对模式填目标坐标。 */
 MotorResult CarMotor_Positions(int32_t left, int32_t right, uint16_t rpm, uint8_t acc, uint8_t mode);
 /* 清速度/位置目标，抢占正常事务等待；不截断已开始的 TX，普通 STOP 保留使能请求。 */
 void CarMotor_StopAll(void);
 /* 已请求使能的零速/停止状态也算活动，仍须按期发心跳。 */
 uint8_t CarMotor_Active(void);
-/* 返回 1 表示恢复已接受/进行中或已无故障；必须等 Faults()==0，随后重新使能。 */
+/* now 填 HAL_GetTick()（当前未使用）；返回1表示接受恢复或已无故障。
+ * 等故障清零后重新使能，再发送运动指令。 */
 uint8_t CarMotor_ClearFault(uint32_t now);
-/* index=0 左轮、1 右轮；单轮模式 index=1 返回空指针，只读内部缓存。 */
+/* index 填0读取左轮、1读取右轮，不是电机地址；无对应电机时返回空指针。 */
 const MotorFeedback *CarMotor_Get(uint8_t index);
 
 #ifdef CAR_TEST

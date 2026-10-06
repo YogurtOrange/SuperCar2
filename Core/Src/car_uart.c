@@ -260,7 +260,7 @@ static uint8_t number(const char *s, int32_t min, int32_t max, int32_t *result)
     if(signed_value<min || signed_value>max) return 0;
     *result=(int32_t)signed_value; return 1;
 }
-/* ASCII 调试命令：严格检查参数，只有已接受的有效控制请求刷新保活。 */
+/* 接收大写文本命令，数字填十进制整数并以换行结束，如 WHEELS 30 30 10\r\n；now 填 HAL_GetTick()。 */
 static void ascii_command(uint32_t now)
 {
     char *words[9], *p=line;
@@ -318,7 +318,8 @@ static void ascii_command(uint32_t now)
     if(r==MOTOR_OK) CarControl_Heartbeat(now);
     text_result(r);
 }
-/* 二进制控制命令：检查长度与序号；STOP/ESTOP 保留安全优先例外。 */
+/* 二进制速度数据：左右RPM各2字节，低字节在前，加速度占1字节；now 填 HAL_GetTick()。
+ * 完整格式见 docs/上位机协议_v1.md；停止和急停指令优先处理。 */
 static void binary_command(uint32_t now)
 {
     const uint8_t *f=codec.data, *p=f+6;
@@ -381,7 +382,8 @@ void CarUart_HostInit(void)
     memset(&codec,0,sizeof(codec));
     line_used=line_discard=binary_mode=have_seq=telemetry_seq=0; reported_fault=0; line_time=0;
 }
-/* 每轮最多消费一个 RX 队列容量的字节，限制主机洪泛占用；坏 ASCII 丢到换行，再接受下一行。 */
+/* now 填 HAL_GetTick()；从 USART2 接收上位机文本或 AA 55 开头的二进制指令。
+ * 每轮只处理有限字节，错误文本丢弃到换行。 */
 void CarUart_HostPoll(uint32_t now)
 {
     uint8_t b;

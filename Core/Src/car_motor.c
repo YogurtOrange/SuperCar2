@@ -134,6 +134,7 @@ static Wheel *by_addr(uint8_t a)
 }
 
 /* ==================== 电机控制接口：配置门禁、目标、停止及异步恢复 ==================== */
+/* i 填0读取左轮、1读取右轮；没有对应电机时返回空指针。 */
 const MotorFeedback *CarMotor_Get(uint8_t i) { return i<count() ? &wheels[i].fb : 0; }
 
 static uint8_t fresh(uint32_t now, uint32_t t)
@@ -193,6 +194,7 @@ static MotorResult can_move(Wheel *w)
     if(w->fb.state==MOTOR_STOPPING || w->position_pending) return MOTOR_BUSY;
     return MOTOR_OK;
 }
+/* addr 填电机地址，默认左1、右2；enable 填1使能、0失能。 */
 MotorResult CarMotor_Enable(uint8_t addr, uint8_t enable)
 {
     Wheel *w=by_addr(addr);
@@ -205,6 +207,8 @@ MotorResult CarMotor_Enable(uint8_t addr, uint8_t enable)
     if(!enable) disable_mask|=(uint8_t)(1U<<(w-wheels));
     return MOTOR_OK;
 }
+/* addr 填电机地址；rpm 填整数RPM，默认 -60~60，正数前进、负数后退、0为零速。
+ * acc 填加速度档位0~255；例如左轮前进可填1、30、10。 */
 MotorResult CarMotor_Velocity(uint8_t addr, int16_t rpm, uint8_t acc)
 {
     Wheel *w=by_addr(addr);
@@ -215,7 +219,8 @@ MotorResult CarMotor_Velocity(uint8_t addr, int16_t rpm, uint8_t acc)
     w->fb.state=MOTOR_SPEED;
     return MOTOR_OK;
 }
-/* 先核验两轮，再写目标，避免右轮失败却已经改变左轮；硬件发送仍逐台进行。 */
+/* l、r 填左右电机的整数RPM，默认 -60~60，正前进、负后退、0零速；acc 填档位0~255。
+ * 例如 CarMotor_Wheels(30, 30, 10)；先检查两轮，再逐台发送。 */
 MotorResult CarMotor_Wheels(int16_t l, int16_t r, uint8_t acc)
 {
     MotorResult a=can_move(&wheels[0]), b;
@@ -227,7 +232,9 @@ MotorResult CarMotor_Wheels(int16_t l, int16_t r, uint8_t acc)
     if(count()==2) CarMotor_Velocity(CAR_RIGHT_ADDR,r,acc);
     return MOTOR_OK;
 }
-/* 脉冲符号映射到安装方向；先转 int64 再取幅值，避免 INT32_MIN 取负溢出。 */
+/* addr 填电机地址；pulses 填整数细分脉冲数；rpm 填正整数RPM，默认1~60；acc 填档位0~255。
+ * mode 填0相对上一目标、1绝对坐标、2相对当前位置。
+ * 相对模式正数向前、负数向后；绝对模式填目标坐标；位置只发送一次。 */
 MotorResult CarMotor_Position(uint8_t addr, int32_t pulses, uint16_t rpm, uint8_t acc, uint8_t mode)
 {
     Wheel *w=by_addr(addr);
@@ -243,6 +250,7 @@ MotorResult CarMotor_Position(uint8_t addr, int32_t pulses, uint16_t rpm, uint8_
     w->fb.state=MOTOR_POSITION;
     return MOTOR_OK;
 }
+/* l、r 填左右轮的整数细分脉冲数；rpm、acc、mode 的填法与上面的单轮位置函数相同。 */
 MotorResult CarMotor_Positions(int32_t l, int32_t r, uint16_t rpm, uint8_t acc, uint8_t mode)
 {
     MotorResult a=can_move(&wheels[0]), b;
