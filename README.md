@@ -8,9 +8,9 @@
 
 1. 打开 `MDK-ARM/SuperCar2.uvprojx`，选择 ARM Compiler 5，编译下载。
 2. 阅读 [下位机实现与联调](docs/下位机实现与联调.md)，确认驱动器设置和接线。
-3. 单轮首次测试时，将 `Core/Inc/car_config.h` 中 `CAR_SINGLE_MOTOR_TEST` 改为 `1`，重新编译。默认双轮配置需要地址 01、02 都在线。
+3. `CAR_SINGLE_MOTOR_TEST`：0=双轮、1=仅左轮、2=仅右轮；修改后重新编译烧录。当前按仅接右轮地址2设为2，Python使用 `--single-right`；双轮运行改回0。
 4. USART2 使用 115200 / 8N1，发送 `PING\r\n`，应返回 `OK PONG`。
-5. 等初始化完成，发送 `MOTOR ENABLE 1`，收到 `OK QUEUED` 后等约 50 ms，再发送 `MOTOR VEL 1 30 10`。运动期间每 100 ms 发送 `HEARTBEAT`；发送 `STOP` 停止。
+5. 当前右轮模式等初始化完成，发送 `MOTOR ENABLE 2`，收到 `OK QUEUED` 后确认使能，再发送 `MOTOR VEL 2 20 10`。运动期间每100 ms发送 `HEARTBEAT`；发送 `STOP` 停止。也可使用下方Python程序自动完成这些步骤。
 
 所有 ASCII 命令以换行结束。`OK QUEUED` 表示下位机接受请求；电机实际状态通过 `STATUS` 或二进制反馈确认。缺少心跳/有效运动控制超过 300 ms 时锁定停机，须 `CLEAR_FAULT` 恢复后重新使能。
 
@@ -38,6 +38,20 @@
 2026-10-05 已完成 3 模块重构，旧的 10 个业务源文件及对应头文件已清理。接口统一为 `CarUart_*`、`CarMotor_*`、`CarControl_*`，协议和控制行为沿用原实现。实施记录见 [模块简化重构规划](docs/模块简化重构规划.md) 和 [项目交接文档](docs/项目交接文档.md)。
 
 ## 编译与软件测试
+
+笔记本暂代香橙派时，USB-TTL接STM32 USART2（TX→PA3、RX←PA2、GND共地），运行根目录 `stm32_host_test.py`。接线、单轮模式、心跳与退出失能的注意点见 [笔记本上位机测试指南](docs/笔记本上位机测试指南.md)。
+
+```powershell
+python -m pip install pyserial
+python stm32_host_test.py --list-ports
+python stm32_host_test.py --port COM11 ping
+python stm32_host_test.py --port COM11 --single-right status
+python stm32_host_test.py --port COM11 --single-right right 20 --run 3
+```
+
+原 `test.py` 是电脑直连驱动器的Emm测试；新程序经STM32控制电机，运动期间自动心跳，正常结束/Ctrl+C/异常时尽力停止、失能并确认。双轮模式要求两个地址都在线；仅左轮用固件模式1和 `--single`，仅右轮用模式2和 `--single-right`。当前配置是右轮模式2，须重新烧录才能生效。
+
+驱动器初始化/回包故障可用根目录 `motor_uart_diag.py` 做1A/42/3A/35只读查询并打印原始字节；**需先断开STM32电机串口，将USB-TTL直连驱动器**，再运行 `python motor_uart_diag.py --port COM11 --direct-driver --addr 2`。接线和诊断结果说明见上面的笔记本测试指南。
 
 ```powershell
 python tools/build_firmware.py --toolchain E:/Keil5/Core/ARM/ARMCC/bin

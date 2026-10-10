@@ -63,7 +63,9 @@ static uint8_t response_length(const X42S_Parser *p)
 {
     if(p->used<2) return 0;
     switch(p->data[1]) {
-    case 0x1A: case 0x3A: case 0xF3: case 0xF6: case 0xFD:
+    /* 实测 X42S Emm：Addr 1A option_hi option_lo 6B，共5字节。 */
+    case 0x1A: return 5;
+    case 0x3A: case 0xF3: case 0xF6: case 0xFD:
     case 0xFE: case 0xFF: case 0x0E: return 4;
     case 0x35: return 6;
     case 0x36: return 8;
@@ -109,6 +111,7 @@ CAR_MOTOR_INTERNAL int64_t X42S_SignedPosition(const uint8_t *f)
  * position_pending 表示位置尚待接收 ACK，motion_due 表示新速度待发。 */
 typedef struct {
     MotorFeedback fb;
+    MotorDiagnostic diag;
     int8_t sign;
     uint8_t init_step, desired_enable, position_pending, position_mode;
     uint8_t motion_due, position_dir;
@@ -122,20 +125,29 @@ static uint8_t pending, pending_wheel, pending_code, stop_mask, zero_stop_mask, 
 static uint8_t recovering, fault_seen, round_robin;
 static uint8_t pending_enable;
 static uint32_t pending_time, quiet_until, next_stop_retry;
+static uint8_t transaction_rx[8], transaction_rx_len;
 
 static uint8_t count(void) { return CAR_SINGLE_MOTOR_TEST ? 1U : CAR_MOTOR_COUNT; }
-static uint8_t all_mask(void) { return (uint8_t)((1U<<count())-1U); }
+static uint8_t first(void) { return CAR_SINGLE_MOTOR_TEST==2 ? 1U : 0U; }
+static uint8_t end(void) { return (uint8_t)(first()+count()); }
+static uint8_t all_mask(void) { return (uint8_t)(((1U<<count())-1U)<<first()); }
 static uint8_t due(uint32_t now, uint32_t deadline) { return (int32_t)(now-deadline)>=0; }
 static Wheel *by_addr(uint8_t a)
 {
     uint8_t i;
-    for(i=0;i<count();i++) if(wheels[i].fb.addr==a) return &wheels[i];
+    for(i=first();i<end();i++) if(wheels[i].fb.addr==a) return &wheels[i];
     return 0;
 }
 
 /* ==================== 电机控制接口：配置门禁、目标、停止及异步恢复 ==================== */
 /* i 填0读取左轮、1读取右轮；没有对应电机时返回空指针。 */
-const MotorFeedback *CarMotor_Get(uint8_t i) { return i<count() ? &wheels[i].fb : 0; }
+const MotorFeedback *CarMotor_Get(uint8_t i) { return i>=first() && i<end() ? &wheels[i].fb : 0; }
+const MotorDiagnostic *CarMotor_GetDiagnostic(uint8_t i)
+{
+    if(!CarMotor_Get(i)) return 0;
+    wheels[i].diag.init_step=wheels[i].init_step;
+    return &wheels[i].diag;
+}
 
 static uint8_t fresh(uint32_t now, uint32_t t)
 { return (uint32_t)(now-t)<=CAR_FEEDBACK_STALE_MS; }
@@ -144,7 +156,7 @@ static uint8_t safe_to_clear(uint32_t now)
 {
     uint8_t i;
     if(pending || stop_mask || zero_stop_mask || clear_mask || disable_mask) return 0;
-    for(i=0;i<count();i++) {
+    for(i=first();i<end();i++) {
         const MotorFeedback *f=&wheels[i].fb;
         if(!f->config_ok || !f->online || f->enabled || f->speed_rpm || (f->flags&0x0C) ||
            !fresh(now,f->speed_time) || !fresh(now,f->status_time)) return 0;
@@ -159,7 +171,7 @@ void CarMotor_StopAll(void)
     pending=0; stop_mask=zero_stop_mask=all_mask();
     X42S_ParserReset(&parser);
     CarUart_FlushRx(UART_MOTOR);
-    for(i=0;i<count();i++) {
+    for(i=first();i<end();i++) {
         wheels[i].fb.target_rpm=0; wheels[i].position_pending=0;
         wheels[i].motion_due=0;
         wheels[i].fb.state=CarControl_Faults() ? MOTOR_FAULT : MOTOR_STOPPING;
@@ -172,15 +184,16 @@ void CarMotor_Init(uint32_t now)
     memset(wheels,0,sizeof(wheels)); memset(&parser,0,sizeof(parser));
     wheels[0].fb.addr=CAR_LEFT_ADDR; wheels[0].sign=CAR_LEFT_SIGN;
     wheels[1].fb.addr=CAR_RIGHT_ADDR; wheels[1].sign=CAR_RIGHT_SIGN;
-    for(i=0;i<count();i++) { wheels[i].fb.acc=CAR_DEFAULT_ACC; wheels[i].retry_at=now; }
+    for(i=first();i<end();i++) { wheels[i].fb.acc=CAR_DEFAULT_ACC; wheels[i].retry_at=now; }
     pending=clear_mask=disable_mask=recovering=fault_seen=round_robin=0;
+    transaction_rx_len=0;
     quiet_until=now; next_stop_retry=now;
     CarMotor_StopAll();
 }
 uint8_t CarMotor_Active(void)
 {
     uint8_t i;
-    for(i=0;i<count();i++) if(wheels[i].desired_enable || wheels[i].position_pending ||
+    for(i=first();i<end();i++) if(wheels[i].desired_enable || wheels[i].position_pending ||
        wheels[i].fb.state==MOTOR_SPEED || wheels[i].fb.state==MOTOR_POSITION) return 1;
     return 0;
 }
@@ -223,13 +236,13 @@ MotorResult CarMotor_Velocity(uint8_t addr, int16_t rpm, uint8_t acc)
  * 例如 CarMotor_Wheels(30, 30, 10)；先检查两轮，再逐台发送。 */
 MotorResult CarMotor_Wheels(int16_t l, int16_t r, uint8_t acc)
 {
-    MotorResult a=can_move(&wheels[0]), b;
+    MotorResult a=can_move(&wheels[first()]), b;
     if(l>CAR_MAX_RPM || l < -CAR_MAX_RPM || r>CAR_MAX_RPM || r < -CAR_MAX_RPM)
         return MOTOR_BAD_ARGUMENT;
     if(a!=MOTOR_OK) return a;
     if(count()==2) { b=can_move(&wheels[1]); if(b!=MOTOR_OK) return b; }
-    CarMotor_Velocity(CAR_LEFT_ADDR,l,acc);
-    if(count()==2) CarMotor_Velocity(CAR_RIGHT_ADDR,r,acc);
+    if(CarMotor_Get(0)) CarMotor_Velocity(CAR_LEFT_ADDR,l,acc);
+    if(CarMotor_Get(1)) CarMotor_Velocity(CAR_RIGHT_ADDR,r,acc);
     return MOTOR_OK;
 }
 /* addr 填电机地址；pulses 填整数细分脉冲数；rpm 填正整数RPM，默认1~60；acc 填档位0~255。
@@ -253,12 +266,12 @@ MotorResult CarMotor_Position(uint8_t addr, int32_t pulses, uint16_t rpm, uint8_
 /* l、r 填左右轮的整数细分脉冲数；rpm、acc、mode 的填法与上面的单轮位置函数相同。 */
 MotorResult CarMotor_Positions(int32_t l, int32_t r, uint16_t rpm, uint8_t acc, uint8_t mode)
 {
-    MotorResult a=can_move(&wheels[0]), b;
+    MotorResult a=can_move(&wheels[first()]), b;
     if(!rpm || rpm>CAR_MAX_RPM || mode>2) return MOTOR_BAD_ARGUMENT;
     if(a!=MOTOR_OK) return a;
     if(count()==2) { b=can_move(&wheels[1]); if(b!=MOTOR_OK) return b; }
-    CarMotor_Position(CAR_LEFT_ADDR,l,rpm,acc,mode);
-    if(count()==2) CarMotor_Position(CAR_RIGHT_ADDR,r,rpm,acc,mode);
+    if(CarMotor_Get(0)) CarMotor_Position(CAR_LEFT_ADDR,l,rpm,acc,mode);
+    if(CarMotor_Get(1)) CarMotor_Position(CAR_RIGHT_ADDR,r,rpm,acc,mode);
     return MOTOR_OK;
 }
 /* 只排入停止->解除保护->失能流程，返回 1 不是已经清故障；后续 Poll 核验安全再清锁存。 */
@@ -278,11 +291,21 @@ uint8_t CarMotor_ClearFault(uint32_t now)
 static void transaction_failed(uint32_t now)
 {
     Wheel *w=&wheels[pending_wheel];
+    w->diag.timeout_code=pending_code;
+    w->diag.timeout_len=transaction_rx_len;
+    memcpy(w->diag.timeout_rx,transaction_rx,transaction_rx_len);
     w->fb.online=0;
     if(w->init_step<5) { w->init_step=0; w->fb.config_ok=0; w->retry_at=now+500U; }
     pending=0; recovering=0; clear_mask=0;
     quiet_until=now+CAR_BUS_QUIET_MS;
     CarControl_Trip(FAULT_MOTOR_COMM);
+}
+static void command_rejected(Wheel *w, const uint8_t *f, uint8_t n)
+{
+    w->diag.reject_code=f[1];
+    w->diag.reject_len=n>sizeof(w->diag.reject_rx) ? sizeof(w->diag.reject_rx) : n;
+    memcpy(w->diag.reject_rx,f,w->diag.reject_len);
+    CarControl_Trip(FAULT_COMMAND);
 }
 static void handle_frame(const uint8_t *f, uint8_t n, uint32_t now)
 {
@@ -295,7 +318,8 @@ static void handle_frame(const uint8_t *f, uint8_t n, uint32_t now)
     pending=0; w->fb.online=1;
     switch(f[1]) {
     case 0x1A:
-        w->fb.option=f[2]; w->init_step=1; break;
+        w->fb.option=(uint16_t)(((uint16_t)f[2]<<8)|f[3]);
+        w->init_step=1; break;
     case 0x42:
         /* 配置门禁：Emm 33 字节/21 参数，UART、115200、地址一致、固定 6B、Receive。
            f[6]=接口，f[18]=波特率，f[20]=地址，f[21]=校验，f[22]=应答。
@@ -308,16 +332,16 @@ static void handle_frame(const uint8_t *f, uint8_t n, uint32_t now)
         } else w->init_step=2;
         break;
     case 0x35:
-        if(f[2]>1) { CarControl_Trip(FAULT_COMMAND); break; }
+        if(f[2]>1) { command_rejected(w,f,n); break; }
         speed=(uint16_t)(((uint16_t)f[3]<<8)|f[4]);
-        if(speed>5000) { CarControl_Trip(FAULT_COMMAND); break; }
+        if(speed>5000) { command_rejected(w,f,n); break; }
         w->fb.speed_rpm=(int16_t)((f[2] ? -(int32_t)speed : speed)*w->sign);
         w->fb.speed_time=now;
         if(w->init_step==3) w->init_step=4;
         if(w->fb.state==MOTOR_STOPPING && !speed) w->fb.state=w->fb.enabled ? MOTOR_READY : MOTOR_DISABLED;
         break;
     case 0x36:
-        if(f[2]>1) { CarControl_Trip(FAULT_COMMAND); break; }
+        if(f[2]>1) { command_rejected(w,f,n); break; }
         w->fb.position_ticks=X42S_SignedPosition(f)*w->sign; w->fb.position_time=now; break;
     case 0x3A:
         w->fb.flags=f[2]; w->fb.enabled=(f[2]&1U); w->fb.status_time=now;
@@ -330,7 +354,7 @@ static void handle_frame(const uint8_t *f, uint8_t n, uint32_t now)
            (w->fb.state==MOTOR_SPEED || w->fb.state==MOTOR_POSITION)) CarControl_Trip(FAULT_DRIVER);
         break;
     default:
-        if(f[2]!=0x02) { CarControl_Trip(FAULT_COMMAND); recovering=0; clear_mask=0; break; }
+        if(f[2]!=0x02) { command_rejected(w,f,n); recovering=0; clear_mask=0; break; }
         if(f[1]==0xF3) {
             /* ACK 对应的是实际发出的使能值；等待期间 desired_enable 可能已改变。 */
             uint8_t en=pending_enable;
@@ -349,6 +373,7 @@ static void handle_frame(const uint8_t *f, uint8_t n, uint32_t now)
 static uint8_t send_frame(uint8_t i, const uint8_t *f, uint8_t n, uint32_t now)
 {
     if(!CarUart_SendMotor(f,n)) return 0;
+    transaction_rx_len=0;
     if(f[1]==0xF3) pending_enable=f[3];
     pending=1; pending_wheel=i; pending_code=f[1]; pending_time=now; return 1;
 }
@@ -362,28 +387,30 @@ void CarMotor_Poll(uint32_t now)
         CarControl_Trip(FAULT_UART);
     }
     while(budget-- && CarUart_Read(UART_MOTOR,&b)) {
+        if(pending && transaction_rx_len<sizeof(transaction_rx))
+            transaction_rx[transaction_rx_len++]=b;
         n=X42S_ParserFeed(&parser,b,now);
         if(n) handle_frame(parser.data,n,now);
     }
     if(pending && (uint32_t)(now-pending_time)>=CAR_BUS_TIMEOUT_MS) transaction_failed(now);
-    if(CarMotor_Active()) for(i=0;i<count();i++) {
+    if(CarMotor_Active()) for(i=first();i<end();i++) {
         if(!fresh(now,wheels[i].fb.status_time) || !fresh(now,wheels[i].fb.speed_time))
             CarControl_Trip(FAULT_MOTOR_COMM);
     }
 /* 故障首次进入时清使能请求；故障未解除且速度非零/反馈过期时约每 100 ms 再发停止。 */
     if(CarControl_Faults() && !fault_seen) {
         fault_seen=1; CarMotor_StopAll(); next_stop_retry=now+100U;
-        for(i=0;i<count();i++) wheels[i].desired_enable=0;
+        for(i=first();i<end();i++) wheels[i].desired_enable=0;
     }
     if(CarControl_Faults() && due(now,next_stop_retry) && !recovering) {
         next_stop_retry=now+100U;
-        for(i=0;i<count();i++) if(wheels[i].fb.speed_rpm || !fresh(now,wheels[i].fb.speed_time)) {
+        for(i=first();i<end();i++) if(wheels[i].fb.speed_rpm || !fresh(now,wheels[i].fb.speed_time)) {
             stop_mask|=(uint8_t)(1U<<i); zero_stop_mask|=(uint8_t)(1U<<i);
         }
     }
     if(recovering && safe_to_clear(now) && CarControl_Clear(1,now)) {
         recovering=0; fault_seen=0;
-        for(i=0;i<count();i++) wheels[i].fb.state=MOTOR_DISABLED;
+        for(i=first();i<end();i++) wheels[i].fb.state=MOTOR_DISABLED;
     }
     if(CarUart_MotorTxBusy()) return;
     /* 先对两轮发 FE 98 专用停止（保留位置模式停止路径），随后补发实测 F6 零速帧。
@@ -391,14 +418,14 @@ void CarMotor_Poll(uint32_t now)
        F6 零速的 dir=0、rpm=0、acc=0、snF=0 与旧 Motor_Emergency_Stop/test.py 一致。 */
     if(stop_mask || zero_stop_mask) {
         pending=0;
-        for(i=0;i<count();i++) if(stop_mask&(1U<<i)) {
+        for(i=first();i<end();i++) if(stop_mask&(1U<<i)) {
             n=X42S_Stop(frame,wheels[i].fb.addr);
             if(CarUart_SendMotor(frame,n)) {
                 stop_mask&=(uint8_t)~(1U<<i); quiet_until=now+CAR_BUS_QUIET_MS;
             }
             return;
         }
-        for(i=0;i<count();i++) if(zero_stop_mask&(1U<<i)) {
+        for(i=first();i<end();i++) if(zero_stop_mask&(1U<<i)) {
             n=X42S_EmmVelocity(frame,wheels[i].fb.addr,0,0);
             if(CarUart_SendMotor(frame,n)) {
                 zero_stop_mask&=(uint8_t)~(1U<<i); quiet_until=now+CAR_BUS_QUIET_MS;
@@ -413,7 +440,7 @@ void CarMotor_Poll(uint32_t now)
  * 配置中的周期是发送资格门槛，不保证固定周期；所有请求争用同一条总线。 */
     for(step=0;step<count();step++) {
         Wheel *w;
-        i=(uint8_t)((round_robin+step)%count()); w=&wheels[i]; n=0;
+        i=(uint8_t)(first()+(round_robin+step)%count()); w=&wheels[i]; n=0;
         if(clear_mask&(1U<<i)) n=X42S_ClearProtection(frame,w->fb.addr);
         else if(disable_mask&(1U<<i)) n=X42S_Enable(frame,w->fb.addr,0);
         else if(w->init_step<5 && due(now,w->retry_at)) {
@@ -447,7 +474,7 @@ void CarMotor_Poll(uint32_t now)
         }
         if(n && send_frame(i,frame,n,now)) {
             if(frame[1]==0xF6) { w->motion_due=0; w->last_velocity=now; }
-            round_robin=(uint8_t)((i+1)%count()); return;
+            round_robin=(uint8_t)((i-first()+1)%count()); return;
         }
     }
 }

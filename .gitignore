@@ -1,5 +1,6 @@
 build/
 MDK-ARM/SuperCar2/
 *.bak
+*.lst
 *.uvguix.*
 __pycache__/

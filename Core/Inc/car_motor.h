@@ -8,8 +8,10 @@ typedef enum { MOTOR_INIT, MOTOR_DISABLED, MOTOR_READY, MOTOR_SPEED,
                MOTOR_POSITION, MOTOR_STOPPING, MOTOR_FAULT } MotorState;
 /* 上述编号 0~6 是线协议的一部分；STOPPING 需反馈证实零速，FAULT 为锁存故障。 */
 typedef struct {
-    /* 地址、选项、配置门禁、3A 原始标志、在线、实际使能、加速度档位。 */
-    uint8_t addr, option, config_ok, flags, online, enabled, acc;
+    /* 地址、配置门禁、3A 原始标志、在线、实际使能、加速度档位。 */
+    uint8_t addr, config_ok, flags, online, enabled, acc;
+    /* 1A回包选项占2字节，大端；实测00 06应解码为0x0006。 */
+    uint16_t option;
     MotorState state;
     /* 都是车体方向修正后的电机轴 RPM；目标值与实际反馈可能暂时不同。 */
     int16_t target_rpm, speed_rpm;
@@ -18,6 +20,11 @@ typedef struct {
     /* HAL 毫秒时钟的实际采样时刻；读反馈要同时检查 online/config_ok 与年龄。 */
     uint32_t speed_time, position_time, status_time;
 } MotorFeedback;
+/* 保留最近超时/拒绝的功能码及最多8字节原始回包，供只读联调查询。 */
+typedef struct {
+    uint8_t init_step, timeout_code, timeout_len, timeout_rx[8];
+    uint8_t reject_code, reject_len, reject_rx[8];
+} MotorDiagnostic;
 typedef enum { MOTOR_OK=0, MOTOR_BAD_ARGUMENT=1, MOTOR_NOT_READY=2,
                MOTOR_SAFETY_LOCK=3, MOTOR_BUSY=4 } MotorResult;
 /* 参数直接填整数，例如 30、-30、10；电机方向由配置自动转换。 */
@@ -25,7 +32,7 @@ typedef enum { MOTOR_OK=0, MOTOR_BAD_ARGUMENT=1, MOTOR_NOT_READY=2,
 void CarMotor_Init(uint32_t now);
 /* 在主循环处理电机任务；now 填 HAL_GetTick() 返回的当前毫秒数。 */
 void CarMotor_Poll(uint32_t now);
-/* addr 填电机地址，默认左轮1、右轮2；单轮模式只用左轮地址。
+/* addr 填电机地址，默认左轮1、右轮2；单轮模式只用配置所选轮的地址。
  * enable 填1使能、0失能；返回成功后还要等电机反馈确认。 */
 MotorResult CarMotor_Enable(uint8_t addr, uint8_t enable);
 /* addr 填电机地址，默认左1、右2；rpm 填整数转速，单位 RPM，默认允许 -60~60。
@@ -50,6 +57,7 @@ uint8_t CarMotor_Active(void);
 uint8_t CarMotor_ClearFault(uint32_t now);
 /* index 填0读取左轮、1读取右轮，不是电机地址；无对应电机时返回空指针。 */
 const MotorFeedback *CarMotor_Get(uint8_t index);
+const MotorDiagnostic *CarMotor_GetDiagnostic(uint8_t index);
 
 #ifdef CAR_TEST
 /* 回归向量使用内部协议接口，不扩展生产控制入口。 */

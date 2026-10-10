@@ -242,6 +242,29 @@ static void text_status(uint8_t index, uint32_t now)
                   f->addr,f->online,f->config_ok,(unsigned long)(now-f->speed_time));
     send_text(s);
 }
+static void text_diag_rx(const char *kind, uint8_t addr, const uint8_t *rx, uint8_t n)
+{
+    char s[72];
+    uint8_t i;
+    int used=snprintf(s,sizeof(s),"DATA %s %u RX",kind,addr);
+    if(!n) used+=snprintf(s+used,sizeof(s)-used," NONE");
+    for(i=0;i<n;i++) used+=snprintf(s+used,sizeof(s)-used," %02X",(unsigned)rx[i]);
+    (void)snprintf(s+used,sizeof(s)-used,"\r\n");
+    send_text(s);
+}
+static void text_diagnostic(uint8_t index)
+{
+    const MotorFeedback *f=CarMotor_Get(index);
+    const MotorDiagnostic *d=CarMotor_GetDiagnostic(index);
+    char s[72];
+    if(!f || !d) { send_text("ERR ARGUMENT\r\n"); return; }
+    (void)snprintf(s,sizeof(s),"DATA DIAG %u INIT %u TIMEOUT 0x%02X REJECT 0x%02X\r\n",
+                  (unsigned)f->addr,(unsigned)d->init_step,
+                  (unsigned)d->timeout_code,(unsigned)d->reject_code);
+    send_text(s);
+    text_diag_rx("TIMEOUT",f->addr,d->timeout_rx,d->timeout_len);
+    text_diag_rx("REJECT",f->addr,d->reject_rx,d->reject_len);
+}
 /* 严格十进制转换：拒绝多余字符、溢出和越界，避免截断后接受错误目标。 */
 static uint8_t number(const char *s, int32_t min, int32_t max, int32_t *result)
 {
@@ -288,7 +311,9 @@ static void ascii_command(uint32_t now)
         send_text(CarMotor_ClearFault(now) ? "OK RECOVERY\r\n" : "ERR ESTOP_ACTIVE\r\n"); return;
     }
     if(n==1 && !strcmp(words[0],"STATUS")) {
-        text_status(0,now); if(!CAR_SINGLE_MOTOR_TEST) text_status(1,now); return;
+        if(CarMotor_Get(0)) text_status(0,now);
+        if(CarMotor_Get(1)) text_status(1,now);
+        return;
     }
     if(n==4 && !strcmp(words[0],"WHEELS") &&
        number(words[1],-CAR_MAX_RPM,CAR_MAX_RPM,&a) &&
@@ -306,8 +331,14 @@ static void ascii_command(uint32_t now)
                 number(words[5],0,255,&d) && (n==6 || number(words[6],0,2,&e)))
             r=CarMotor_Position((uint8_t)a,b,(uint16_t)c,(uint8_t)d,(uint8_t)e);
         else if(n==3 && !strcmp(words[1],"STOP") &&
-                (a==CAR_LEFT_ADDR || (a==CAR_RIGHT_ADDR && !CAR_SINGLE_MOTOR_TEST))) {
+                ((a==CAR_LEFT_ADDR && CarMotor_Get(0)) ||
+                 (a==CAR_RIGHT_ADDR && CarMotor_Get(1)))) {
             CarMotor_StopAll(); r=MOTOR_OK;
+        } else if(n==3 && !strcmp(words[1],"DIAG")) {
+            if(a==CAR_LEFT_ADDR) text_diagnostic(0);
+            else if(a==CAR_RIGHT_ADDR) text_diagnostic(1);
+            else send_text("ERR ARGUMENT\r\n");
+            return;
         } else if(n==3 && !strcmp(words[1],"STATUS")) {
             if(a==CAR_LEFT_ADDR) text_status(0,now);
             else if(a==CAR_RIGHT_ADDR) text_status(1,now);
@@ -363,8 +394,8 @@ static void binary_command(uint32_t now)
             /* 新会话：先停双轮、请求失能，再重设序号窗口；保留故障锁存。
                HELLO 成功后仍要核验状态，重新使能并下发新目标。 */
             CarMotor_StopAll();
-            (void)CarMotor_Enable(CAR_LEFT_ADDR,0);
-            if(!CAR_SINGLE_MOTOR_TEST) (void)CarMotor_Enable(CAR_RIGHT_ADDR,0);
+            if(CarMotor_Get(0)) (void)CarMotor_Enable(CAR_LEFT_ADDR,0);
+            if(CarMotor_Get(1)) (void)CarMotor_Enable(CAR_RIGHT_ADDR,0);
             have_seq=0; result=MOTOR_OK;
         }
         break;

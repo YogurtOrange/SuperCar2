@@ -20,6 +20,8 @@ static uint8_t have_motor_end;
 static uint8_t motor_frames[1024][16], motor_lengths[1024];
 static uint32_t motor_times[1024], motor_frame_count;
 static uint8_t bad_config, drop_position_ack;
+static uint16_t driver_option=6;
+static uint8_t reject_ack, extra_ack_byte;
 static char host_output[16384];
 static uint32_t host_output_len;
 static uint32_t invalid_buffer_mutations;
@@ -79,15 +81,21 @@ HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *u, uint8_t *f, uint16
     }
     if(!connected[i]) return HAL_OK;
     reply[0]=f[0]; reply[1]=code; reply[2]=2; reply[3]=0x6B; reply_len=4;
-    if(code==0x1A) reply[2]=6;
-    if(code==0x42) {
-        memset(reply+2,0,31); reply[2]=0x21;
-        /* 仍是 Emm 回包，错误接口参数用于验证配置门禁拒绝使能。 */
-        reply[3]=0x15; reply[6]=bad_config ? 3 : 2;
-        reply[18]=5; reply[20]=f[0]; reply[22]=1;
-        reply_len=33; reply[reply_len-1]=0x6B;
+    if(code==0x1A) {
+        /* 用户实测：02 1A 00 06 6B；不能再用错误的4字节模拟回包。 */
+        reply[2]=(uint8_t)(driver_option>>8); reply[3]=(uint8_t)driver_option;
+        reply[4]=0x6B; reply_len=5;
     }
-    if(code==0xF3) driver_enabled[i]=f[3];
+    if(code==0x42) {
+        /* 用户实测33字节配置；地址按被查询驱动器替换。 */
+        static const uint8_t captured[]={
+            0x02,0x42,0x21,0x15,0x19,0x02,0x02,0x02,0x00,0x10,0x01,
+            0x00,0x04,0xB0,0x0B,0xB8,0x0F,0xA0,0x05,0x07,0x02,0x00,
+            0x01,0x01,0x00,0x08,0x08,0x98,0x07,0xD0,0x00,0x08,0x6B};
+        memcpy(reply,captured,sizeof(captured)); reply[0]=f[0];
+        reply[6]=bad_config ? 3 : 2; reply[20]=f[0]; reply_len=sizeof(captured);
+    }
+    if(code==0xF3 && code!=reject_ack) driver_enabled[i]=f[3];
     if(code==0xFE) driver_speed[i]=0;
     if(code==0x0E) driver_fault[i]=0;
     if(code==0xF6) {
@@ -105,6 +113,10 @@ HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *u, uint8_t *f, uint16
         reply[7]=0x6B; reply_len=8;
     }
     if(code==0xFD && drop_position_ack) reply_len=0;
+    if(code==reject_ack) reply[2]=0xE2;
+    if(code==0xF3 && extra_ack_byte) {
+        reply[2]=0; reply[3]=2; reply[4]=0x6B; reply_len=5;
+    }
     reply_at=tx_done[0]+1;
     return HAL_OK;
 }
@@ -135,12 +147,14 @@ static void binary(uint8_t type, uint8_t seq, const uint8_t *p, uint8_t n, uint8
     if(corrupt) f[len-1]^=1;
     inject(1,f,len); CarControl_Poll();
 }
-static void reset(void)
+static void reset_with_option(uint16_t option)
 {
     tick=0; memset(rx,0,sizeof(rx)); memset(tx_active,0,sizeof(tx_active));
     memset(driver_enabled,0,sizeof(driver_enabled)); memset(driver_speed,0,sizeof(driver_speed));
     memset(driver_fault,0,sizeof(driver_fault));
     connected[0]=connected[1]=1; estop=bad_config=drop_position_ack=reply_len=0;
+    driver_option=option;
+    reject_ack=extra_ack_byte=0;
     position_commands=velocity_commands=stop_commands=zero_stop_commands=host_output_len=0;
     motor_frame_count=0; have_motor_end=0; last_motor_end=0;
     invalid_buffer_mutations=0; host_output[0]=0;
@@ -149,6 +163,7 @@ static void reset(void)
     test_gpio_b_clock=test_gpio_c_clock=0;
     CarControl_Init(&uart[0],&uart[1]); advance(150);
 }
+static void reset(void) { reset_with_option(6); }
 static void test_board_control(void)
 {
     reset();
@@ -165,6 +180,7 @@ static void test_board_control(void)
     assert(CarControl_Faults()&FAULT_ESTOP);
     advance(100); assert(led_state==GPIO_PIN_RESET);
 }
+#if CAR_SINGLE_MOTOR_TEST==0
 static void enabled(void)
 {
     reset(); assert(!CarControl_Faults());
@@ -174,6 +190,7 @@ static void enabled(void)
     ascii("MOTOR ENABLE 2\r\n"); advance(30);
     assert(driver_enabled[0] && driver_enabled[1]);
 }
+#endif
 static void test_vectors(void)
 {
     const uint8_t vel[]={1,0xF6,0,0,30,10,0,0x6B};
@@ -189,6 +206,20 @@ static void test_vectors(void)
     assert(X42S_EmmVelocity(f,1,30,10)==8 && !memcmp(f,vel,8));
     assert(X42S_EmmPosition(f,2,1,3200,30,10,2)==13);
     assert(f[8]==0x0C && f[9]==0x80 && f[10]==2);
+    {
+        const uint8_t captured[]={2,0x1A,0,6,0x6B};
+        const uint8_t interior_6b[]={2,0x1A,0x6B,6,0x6B};
+        const uint8_t old_short[]={2,0x1A,6,0x6B};
+        for(i=0;i<sizeof(captured);i++)
+            assert(X42S_ParserFeed(&xp,captured[i],1)==(i==4 ? 5 : 0));
+        assert(!memcmp(xp.data,captured,sizeof(captured)));
+        for(i=0;i<sizeof(interior_6b);i++)
+            assert(X42S_ParserFeed(&xp,interior_6b[i],2)==(i==4 ? 5 : 0));
+        X42S_ParserReset(&xp);
+        for(i=0;i<sizeof(old_short);i++) assert(!X42S_ParserFeed(&xp,old_short[i],3));
+        for(i=0;i<sizeof(captured);i++)
+            assert(X42S_ParserFeed(&xp,captured[i],4)==(i==4 ? 5 : 0));
+    }
     {
         uint8_t config[33]={1,0x42,0x21,0x15};
         uint8_t malformed[34]={1,0x42,0x22};
@@ -215,6 +246,7 @@ static void test_vectors(void)
     for(i=1;i<n;i++) if(i==n-1) assert(HostCodec_Feed(&hp,f[i],40)==1);
     else (void)HostCodec_Feed(&hp,f[i],40);
 }
+#if CAR_SINGLE_MOTOR_TEST==0
 static void test_watchdog_and_recovery(void)
 {
     uint32_t moves, j;
@@ -315,14 +347,120 @@ static void test_session_and_tx_timeout(void)
     advance(50); assert(CarControl_Faults()&FAULT_UART);
     assert(stop_commands>=4 && zero_stop_commands>=4);
 }
+#else
+static void test_single_motor(void)
+{
+    uint8_t index=(CAR_SINGLE_MOTOR_TEST==2 ? 1U : 0U), other=(uint8_t)(1U-index);
+    uint8_t addr=(index ? CAR_RIGHT_ADDR : CAR_LEFT_ADDR);
+    uint8_t speed_payload[5]={15,0,25,0,10};
+    uint32_t j;
+    char command[64], expected[32];
+    reset(); connected[other]=0; advance(500);
+    assert(!CarControl_Faults() && !CarMotor_Get(other));
+    assert(CarMotor_Get(index)->config_ok && CarMotor_Get(index)->online);
+    assert(CarMotor_Enable(index ? CAR_LEFT_ADDR : CAR_RIGHT_ADDR,1)==MOTOR_BAD_ARGUMENT);
+    ascii("STATUS\n"); advance(20);
+    (void)snprintf(expected,sizeof(expected),"DATA MOTOR %u ",addr);
+    assert(strstr(host_output,expected));
+    (void)snprintf(expected,sizeof(expected),"DATA MOTOR %u ",index ? CAR_LEFT_ADDR : CAR_RIGHT_ADDR);
+    assert(!strstr(host_output,expected));
+    (void)snprintf(command,sizeof(command),"MOTOR ENABLE %u\n",addr);
+    ascii(command); advance(40);
+    assert(driver_enabled[index] && !driver_enabled[other]);
+    binary(1,1,speed_payload,5,0); advance(80);
+    assert(driver_speed[index]==(index ? 25*CAR_RIGHT_SIGN : 15*CAR_LEFT_SIGN));
+    assert(CarMotor_Get(index)->speed_rpm==(index ? 25 : 15));
+    ascii("HEARTBEAT\n"); advance(40);
+    (void)snprintf(command,sizeof(command),"MOTOR POS %u 800 20 10\n",addr);
+    ascii(command); advance(80); assert(position_commands==1);
+    (void)snprintf(command,sizeof(command),"MOTOR STOP %u\n",addr);
+    ascii(command); advance(80); assert(driver_speed[index]==0);
+    binary(0x12,0,0,0,0); advance(80); assert(!driver_enabled[index]);
+    (void)snprintf(command,sizeof(command),"MOTOR ENABLE %u\n",addr);
+    ascii(command); advance(40);
+    ascii("ESTOP\n"); advance(40); assert(CarControl_Faults()&FAULT_ESTOP);
+    ascii("CLEAR_FAULT\n"); advance(150);
+    assert(!CarControl_Faults() && !driver_enabled[index]);
+    ascii(command); advance(40);
+    advance(320); assert(CarControl_Faults()&FAULT_HOST_TIMEOUT);
+    ascii("CLEAR_FAULT\n"); advance(150); assert(!CarControl_Faults());
+    for(j=0;j<motor_frame_count;j++) assert(motor_frames[j][0]==addr);
+    assert(!invalid_buffer_mutations);
+}
+#endif
+
+static void test_captured_options_and_config(void)
+{
+    uint8_t i;
+    reset();
+    assert(!CarControl_Faults());
+    for(i=0;i<CAR_MOTOR_COUNT;i++) if(CarMotor_Get(i)) {
+        const MotorFeedback *fb=CarMotor_Get(i);
+        assert(fb->option==6 && fb->online && fb->config_ok);
+        assert(fb->state==MOTOR_DISABLED && !fb->enabled);
+    }
+    /* 保留高字节，不把00 06错读成00；仍保留Emm/无缩放门禁。 */
+    reset_with_option(0x6B06);
+    assert(!CarControl_Faults());
+    for(i=0;i<CAR_MOTOR_COUNT;i++) if(CarMotor_Get(i))
+        assert(CarMotor_Get(i)->option==0x6B06 && CarMotor_Get(i)->config_ok);
+    reset_with_option(0x0086);
+    assert(CarControl_Faults()&FAULT_CONFIG);
+    for(i=0;i<CAR_MOTOR_COUNT;i++) if(CarMotor_Get(i))
+        assert(!CarMotor_Get(i)->config_ok && !driver_enabled[i]);
+}
+
+static void test_motor_diagnostics(void)
+{
+    uint8_t index=(CAR_SINGLE_MOTOR_TEST==2 ? 1U : 0U);
+    uint8_t addr=(index ? CAR_RIGHT_ADDR : CAR_LEFT_ADDR);
+    const MotorDiagnostic *d;
+    char command[48], expected[48];
+    reset();
+    d=CarMotor_GetDiagnostic(index);
+    assert(d && d->init_step==5 && !d->timeout_code && !d->reject_code);
+    reject_ack=0xF3;
+    (void)snprintf(command,sizeof(command),"MOTOR ENABLE %u\n",addr);
+    ascii(command); advance(50);
+    assert(CarControl_Faults()&FAULT_COMMAND);
+    d=CarMotor_GetDiagnostic(index);
+    assert(d->reject_code==0xF3 && d->reject_len==4);
+    assert(d->reject_rx[0]==addr && d->reject_rx[1]==0xF3 && d->reject_rx[2]==0xE2);
+    connected[index]=0; advance(100);
+    d=CarMotor_GetDiagnostic(index);
+    assert(CarControl_Faults()&FAULT_MOTOR_COMM);
+    assert(d->timeout_code && d->reject_code==0xF3);
+    (void)snprintf(command,sizeof(command),"MOTOR DIAG %u\n",addr);
+    ascii(command); advance(30);
+    (void)snprintf(expected,sizeof(expected),"DATA DIAG %u INIT 5 TIMEOUT 0x",addr);
+    assert(strstr(host_output,expected));
+    (void)snprintf(expected,sizeof(expected),"DATA REJECT %u RX %02X F3 E2 6B",addr,addr);
+    assert(strstr(host_output,expected));
+    reset(); extra_ack_byte=1;
+    (void)snprintf(command,sizeof(command),"MOTOR ENABLE %u\n",addr);
+    ascii(command); advance(100);
+    d=CarMotor_GetDiagnostic(index);
+    assert(CarControl_Faults()&FAULT_MOTOR_COMM);
+    assert(d->timeout_code==0xF3 && d->timeout_len==5);
+    assert(d->timeout_rx[0]==addr && d->timeout_rx[1]==0xF3 && d->timeout_rx[2]==0
+           && d->timeout_rx[3]==2 && d->timeout_rx[4]==0x6B);
+    assert(!invalid_buffer_mutations);
+}
+
 int main(void)
 {
     test_board_control(); puts("PASS real board GPIO, LED and watchdog register setup/feed");
     test_vectors(); puts("PASS frame vectors, CRC and parser recovery");
+    test_captured_options_and_config(); puts("PASS captured 5-byte 1A and 33-byte 42, 16-bit options and retained config gate");
+    test_motor_diagnostics(); puts("PASS retained timeout/rejection codes, raw invalid ACK and read-only ASCII diagnostics");
+#if CAR_SINGLE_MOTOR_TEST==0
     test_watchdog_and_recovery(); puts("PASS host watchdog, stop and explicit recovery");
     test_preempt_and_faults(); puts("PASS ESTOP preemption, physical input, driver/communication/UART faults");
     test_positions_and_binary(); puts("PASS position exactly once, binary replay/CRC/length, bounds, TX buffer lifetime");
     test_configuration(); puts("PASS firmware configuration gate");
     test_session_and_tx_timeout(); puts("PASS session reset and stalled UART TX watchdog");
+#else
+    test_single_motor(); puts("PASS selected single motor, inactive bus silence, direction, position, HELLO, watchdog and recovery");
+#endif
     return 0;
 }

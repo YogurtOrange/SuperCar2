@@ -53,9 +53,14 @@
 /* 上位机二进制状态/反馈的自动回传间隔；ASCII 模式仅自动回报故障变化。 */
 #define CAR_TELEMETRY_PERIOD_MS       100U
 
-/* ==================== 联调与保护开关（0=关闭，1=开启） ==================== */
-/* 1=只联调 CAR_LEFT_ADDR，忽略右轮；装车双轮运行前改回 0 并重新烧录。 */
-#define CAR_SINGLE_MOTOR_TEST         0
+/* ==================== 联调模式与保护开关（保护开关0=关闭，1=开启） ==================== */
+/* 0=双轮；1=只接左轮；2=只接右轮。当前按右轮地址2联调，双轮运行前改回0并烧录。 */
+#ifndef CAR_SINGLE_MOTOR_TEST
+#define CAR_SINGLE_MOTOR_TEST         2
+#endif
+#if CAR_SINGLE_MOTOR_TEST < 0 || CAR_SINGLE_MOTOR_TEST > 2
+#error CAR_SINGLE_MOTOR_TEST_must_be_0_1_or_2
+#endif
 /* PB12 上拉、低有效：接 GND 触发急停；恢复前必须释放。 */
 #define CAR_USE_ESTOP_PIN             1
 /* PB13/PB14 上拉、低有效报警，接线/电平确认后才设 1；默认只读 UART 保护状态。
