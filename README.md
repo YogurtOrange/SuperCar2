@@ -1,6 +1,6 @@
 # SuperCar2：STM32 双 X42S 下位机
 
-基于已有 STM32F103C8T6 / HAL / Keil 工程实现，控制链路为 **香橙派 UART1 → STM32 USART2 → USART1 共享 TTL 总线 → 两台 X42S（Emm 固件）**。上位机处理 ROS、导航、差速换算；STM32 接收左右轮 RPM/位置脉冲数，执行驱动器通信、安全保护和反馈。当前实际接线为左轮地址 1、右轮地址 2。
+基于已有 STM32F103C8T6 / HAL / Keil 工程实现，控制链路为 **香橙派 UART0 → STM32 USART2 → USART1 共享 TTL 总线 → 两台 X42S（Emm 固件）**。上位机处理 ROS、导航、差速换算；STM32 接收左右轮 RPM/位置脉冲数，执行驱动器通信、安全保护和反馈。当前实际接线为左轮地址 1、右轮地址 2。
 
 电机协议仅保留 Emm 固件实现，速度使用 RPM，位置配置回包只接受 Emm 的 33 字节格式。
 
@@ -8,9 +8,9 @@
 
 1. 打开 `MDK-ARM/SuperCar2.uvprojx`，选择 ARM Compiler 5，编译下载。
 2. 阅读 [下位机实现与联调](docs/下位机实现与联调.md)，确认驱动器设置和接线。
-3. `CAR_SINGLE_MOTOR_TEST`：0=双轮、1=仅左轮、2=仅右轮；修改后重新编译烧录。当前按仅接右轮地址2设为2，Python使用 `--single-right`；双轮运行改回0。
+3. `CAR_SINGLE_MOTOR_TEST`：0=双轮、1=仅左轮、2=仅右轮；当前配置为0，Python不加单轮参数。若板上仍为原右轮模式2，必须重新编译烧录；两个地址1/2的驱动器均须上电并正确回包。
 4. USART2 使用 115200 / 8N1，发送 `PING\r\n`，应返回 `OK PONG`。
-5. 当前右轮模式等初始化完成，发送 `MOTOR ENABLE 2`，收到 `OK QUEUED` 后确认使能，再发送 `MOTOR VEL 2 20 10`。运动期间每100 ms发送 `HEARTBEAT`；发送 `STOP` 停止。也可使用下方Python程序自动完成这些步骤。
+5. 双轮等初始化完成，分别发送 `MOTOR ENABLE 1 1`、`MOTOR ENABLE 2 1`，收到 `OK QUEUED` 后查询并确认两轮使能，再发送 `WHEELS 10 10 10`。使能及运动期间每100 ms发送 `HEARTBEAT`；发送 `STOP` 停止。推荐使用下方Python程序自动完成心跳、状态确认和退出失能。
 
 所有 ASCII 命令以换行结束。`OK QUEUED` 表示下位机接受请求；电机实际状态通过 `STATUS` 或二进制反馈确认。缺少心跳/有效运动控制超过 300 ms 时锁定停机，须 `CLEAR_FAULT` 恢复后重新使能。
 
@@ -39,17 +39,29 @@
 
 ## 编译与软件测试
 
+香橙派使用根目录 `orangepi_host_test.py`，可单独复制到板上运行。Orange Pi 5的26针排针物理8脚TX→STM32 PA3、10脚RX←PA2、14脚GND→STM32 GND；各自供电。默认串口 `/dev/ttyS0`、115200/8N1。先重新烧录当前双轮固件，再架空车轮测试：
+
+```bash
+sudo apt install python3-serial
+python3 orangepi_host_test.py ping
+python3 orangepi_host_test.py status
+python3 orangepi_host_test.py wheels 10 10 --acc 10 --run 2
+python3 orangepi_host_test.py wheels -10 -10 --acc 10 --run 2
+```
+
+`wheels` 的两个速度依次为左轮、右轮，均以车体前进为正；STM32转换右轮物理方向，上位机无需再次反转。默认状态查询、运动前检查和退出失能均覆盖两轮；双轮命令不要加 `--single` 或 `--single-right`。
+
 笔记本暂代香橙派时，USB-TTL接STM32 USART2（TX→PA3、RX←PA2、GND共地），运行根目录 `stm32_host_test.py`。接线、单轮模式、心跳与退出失能的注意点见 [笔记本上位机测试指南](docs/笔记本上位机测试指南.md)。
 
 ```powershell
 python -m pip install pyserial
 python stm32_host_test.py --list-ports
 python stm32_host_test.py --port COM11 ping
-python stm32_host_test.py --port COM11 --single-right status
-python stm32_host_test.py --port COM11 --single-right right 20 --run 3
+python stm32_host_test.py --port COM11 status
+python stm32_host_test.py --port COM11 wheels 10 10 --run 2
 ```
 
-原 `test.py` 是电脑直连驱动器的Emm测试；新程序经STM32控制电机，运动期间自动心跳，正常结束/Ctrl+C/异常时尽力停止、失能并确认。双轮模式要求两个地址都在线；仅左轮用固件模式1和 `--single`，仅右轮用模式2和 `--single-right`。当前配置是右轮模式2，须重新烧录才能生效。
+原 `test.py` 是电脑直连驱动器的Emm测试；新程序经STM32控制电机，运动期间自动心跳，正常结束/Ctrl+C/异常时尽力停止、失能并确认。双轮模式要求两个地址都在线；仅左轮用固件模式1和 `--single`，仅右轮用模式2和 `--single-right`。切换模式须重新编译烧录才能生效。
 
 驱动器初始化/回包故障可用根目录 `motor_uart_diag.py` 做1A/42/3A/35只读查询并打印原始字节；**需先断开STM32电机串口，将USB-TTL直连驱动器**，再运行 `python motor_uart_diag.py --port COM11 --direct-driver --addr 2`。接线和诊断结果说明见上面的笔记本测试指南。
 

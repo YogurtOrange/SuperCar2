@@ -54,9 +54,9 @@
 #define CAR_TELEMETRY_PERIOD_MS       100U
 
 /* ==================== 联调模式与保护开关（保护开关0=关闭，1=开启） ==================== */
-/* 0=双轮；1=只接左轮；2=只接右轮。当前按右轮地址2联调，双轮运行前改回0并烧录。 */
+/* 0=双轮；1=只接左轮；2=只接右轮。当前双轮运行，两台驱动器均须连接并上电。 */
 #ifndef CAR_SINGLE_MOTOR_TEST
-#define CAR_SINGLE_MOTOR_TEST         2
+#define CAR_SINGLE_MOTOR_TEST         0
 #endif
 #if CAR_SINGLE_MOTOR_TEST < 0 || CAR_SINGLE_MOTOR_TEST > 2
 #error CAR_SINGLE_MOTOR_TEST_must_be_0_1_or_2
